@@ -24,6 +24,7 @@
   "scripts": {
     "prebuild": "rimraf lib",
     "build": "unbuild",
+    "postbuild": "node -e \"const fs=require('fs');const f='lib/cli.cjs';let c=fs.readFileSync(f,'utf8');if(c.startsWith('// #!')){c=c.slice(3)}if(!c.startsWith('#!')){c='#!/usr/bin/env node\\n'+c}fs.writeFileSync(f,c);fs.chmodSync(f,0o755)\"",
     "test": "jest"
   },
   "license": "MIT",
