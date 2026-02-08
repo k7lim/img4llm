@@ -12,10 +12,14 @@
     }
   },
   "types": "./lib/index.d.ts",
+  "bin": {
+    "img4llm": "lib/cli.cjs"
+  },
   "files": [
     "README.md",
     "LICENSE",
-    "lib"
+    "lib",
+    "src"
   ],
   "scripts": {
     "prebuild": "rimraf lib",
