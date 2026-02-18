@@ -3,43 +3,77 @@ import { extname } from 'node:path'
 
 // --- Types ---
 
+/** Image metadata extracted from the input buffer */
 export interface ImageMetadata {
+  /** Image dimensions in pixels */
   dimensions: { width: number; height: number }
+  /** Image format (jpeg, png, webp, gif, svg, etc.) */
   format: string
+  /** File size in bytes */
   filesize: number
+  /** Approximate count of distinct colors (sampled) */
   distinctColors: number
+  /** Aspect ratio (width / height) */
   aspectRatio: number
 }
 
+/** Processing strategy determined by image analysis */
 export enum ImageStrategy {
+  /** Resize and compress as JPEG */
   RASTER_OPTIMIZE = 'RASTER_OPTIMIZE',
+  /** Convert to SVG (currently falls back to RASTER_OPTIMIZE) */
   CONVERT_TO_SVG = 'CONVERT_TO_SVG',
+  /** Return unchanged (used for SVGs) */
   KEEP_AS_IS = 'KEEP_AS_IS',
 }
 
+/** Result of analyzing an image */
 export interface ImageAnalysisResult {
+  /** Extracted image metadata */
   metadata: ImageMetadata
+  /** Recommended processing strategy */
   strategy: ImageStrategy
+  /** Confidence score (currently always 1) */
   confidence: number
 }
 
+/** Options for image optimization */
 export interface OptimizeOptions {
+  /** Maximum width/height in pixels. Default: 768 */
   maxDimension?: number
+  /** JPEG quality (1-100). Default: 85 */
   quality?: number
+  /** Generate a caption using Ollama. Default: false */
   generateCaption?: boolean
+  /** Ollama model to use for caption generation. Default: 'qwen3-vl:4b' */
   captionModel?: string
 }
 
+/** Result of image optimization */
 export interface OptimizeResult {
+  /** Optimized image buffer */
   buffer: Buffer
+  /** Metadata from the original image */
   metadata: ImageMetadata
+  /** Processing strategy that was applied */
   strategy: ImageStrategy
+  /** MIME type of the output image */
   mimeType: string
+  /** Generated caption (only if generateCaption was true) */
   caption?: string
 }
 
 // --- Image analysis ---
 
+/**
+ * Extract metadata from an image buffer.
+ * @param input - The image buffer to analyze
+ * @returns Image metadata including dimensions, format, file size, and color information
+ * @example
+ * const buffer = await readFile('image.png')
+ * const metadata = await extractMetadata(buffer)
+ * console.log(metadata.dimensions) // { width: 1920, height: 1080 }
+ */
 export async function extractMetadata(input: Buffer): Promise<ImageMetadata> {
   const meta = await sharp(input).metadata()
   const width = meta.width ?? 0
@@ -54,6 +88,13 @@ export async function extractMetadata(input: Buffer): Promise<ImageMetadata> {
   }
 }
 
+/**
+ * Count approximate number of distinct colors in an image.
+ * Uses sampling for performance on large images.
+ * @param input - The image buffer
+ * @param sampleSize - Number of pixels to sample. Default: 1000
+ * @returns Approximate count of distinct colors
+ */
 export async function countDistinctColors(input: Buffer, sampleSize = 1000): Promise<number> {
   const image = sharp(input).removeAlpha().raw()
   const { data, info } = await image.toBuffer({ resolveWithObject: true })
@@ -71,6 +112,14 @@ export async function countDistinctColors(input: Buffer, sampleSize = 1000): Pro
   return colors.size
 }
 
+/**
+ * Determine the optimal processing strategy based on image metadata.
+ * - SVGs are kept as-is
+ * - Large files (>1MB) or many colors (>10k): raster optimization
+ * - Simple images (<256 colors, <200KB): potential SVG conversion
+ * @param metadata - Image metadata to analyze
+ * @returns Recommended processing strategy
+ */
 export function determineStrategy(metadata: ImageMetadata): ImageStrategy {
   if (metadata.format === 'svg') return ImageStrategy.KEEP_AS_IS
   if (metadata.filesize > 1_000_000 || metadata.distinctColors > 10_000) return ImageStrategy.RASTER_OPTIMIZE
@@ -78,6 +127,13 @@ export function determineStrategy(metadata: ImageMetadata): ImageStrategy {
   return ImageStrategy.RASTER_OPTIMIZE
 }
 
+/**
+ * Optimize a raster image by resizing and compressing to JPEG.
+ * @param input - The image buffer to optimize
+ * @param maxDimension - Maximum width/height in pixels. Default: 768
+ * @param quality - JPEG quality (1-100). Default: 85
+ * @returns Optimized image buffer as JPEG
+ */
 export async function optimizeRasterImage(input: Buffer, maxDimension = 768, quality = 85): Promise<Buffer> {
   return sharp(input)
     .resize(maxDimension, maxDimension, {
@@ -88,6 +144,15 @@ export async function optimizeRasterImage(input: Buffer, maxDimension = 768, qua
     .toBuffer()
 }
 
+/**
+ * Analyze an image and determine the optimal processing strategy.
+ * @param input - The image buffer to analyze
+ * @returns Analysis result with metadata and recommended strategy
+ * @example
+ * const buffer = await readFile('image.png')
+ * const analysis = await analyzeImage(buffer)
+ * console.log(analysis.strategy) // ImageStrategy.RASTER_OPTIMIZE
+ */
 export async function analyzeImage(input: Buffer): Promise<ImageAnalysisResult> {
   const metadata = await extractMetadata(input)
   const strategy = determineStrategy(metadata)
@@ -98,6 +163,18 @@ export async function analyzeImage(input: Buffer): Promise<ImageAnalysisResult> 
 
 const OLLAMA_BASE_URL = 'http://localhost:11434'
 
+/**
+ * Generate a caption for an image using Ollama vision models.
+ * Requires Ollama to be running locally on port 11434.
+ * @param input - The image buffer
+ * @param model - Ollama model name. Default: 'qwen3-vl:4b'
+ * @returns Generated caption string
+ * @throws Error if Ollama is unavailable
+ * @example
+ * const buffer = await readFile('photo.jpg')
+ * const caption = await generateCaption(buffer)
+ * console.log(caption) // "A cat sitting on a windowsill"
+ */
 export async function generateCaption(input: Buffer, model = 'qwen3-vl:4b'): Promise<string> {
   const healthRes = await fetch(`${OLLAMA_BASE_URL}/api/tags`).catch(() => null)
   if (!healthRes || !healthRes.ok) {
@@ -125,6 +202,11 @@ export async function generateCaption(input: Buffer, model = 'qwen3-vl:4b'): Pro
 
 // --- MIME type helpers ---
 
+/**
+ * Get MIME type from a file path extension.
+ * @param filepath - File path with extension
+ * @returns MIME type string (e.g., 'image/jpeg')
+ */
 export function getImageMimeType(filepath: string): string {
   const ext = extname(filepath).toLowerCase()
   const mimeTypes: Record<string, string> = {
@@ -138,6 +220,11 @@ export function getImageMimeType(filepath: string): string {
   return mimeTypes[ext] || 'application/octet-stream'
 }
 
+/**
+ * Get MIME type from an image format string.
+ * @param format - Image format (jpeg, png, webp, gif, svg)
+ * @returns MIME type string
+ */
 export function getImageMimeTypeFromFormat(format: string): string {
   const normalized = format.toLowerCase()
   const mimeTypes: Record<string, string> = {
@@ -153,6 +240,14 @@ export function getImageMimeTypeFromFormat(format: string): string {
 
 // --- Strategy processing ---
 
+/**
+ * Process an image according to the determined strategy.
+ * @param buffer - The image buffer to process
+ * @param analysis - Analysis result containing the strategy to apply
+ * @param maxDimension - Maximum width/height for raster optimization
+ * @param quality - JPEG quality for raster optimization
+ * @returns Processed image buffer
+ */
 export async function processImageByStrategy(
   buffer: Buffer,
   analysis: ImageAnalysisResult,
@@ -172,6 +267,35 @@ export async function processImageByStrategy(
 
 // --- Main API ---
 
+/**
+ * Optimize an image for LLM vision consumption.
+ *
+ * This is the main entry point for image optimization. It analyzes the image,
+ * determines the best strategy, processes it accordingly, and optionally
+ * generates a caption using Ollama.
+ *
+ * @param input - The image buffer to optimize
+ * @param options - Optimization options
+ * @param options.maxDimension - Maximum width/height in pixels. Default: 768
+ * @param options.quality - JPEG quality (1-100). Default: 85
+ * @param options.generateCaption - Generate caption via Ollama. Default: false
+ * @param options.captionModel - Ollama model for captions. Default: 'qwen3-vl:4b'
+ * @returns Optimization result with processed buffer, metadata, and optional caption
+ * @example
+ * import { optimizeForLLM } from 'img4llm'
+ * import { readFile, writeFile } from 'node:fs/promises'
+ *
+ * const input = await readFile('large-photo.png')
+ * const result = await optimizeForLLM(input, {
+ *   maxDimension: 512,
+ *   quality: 80,
+ *   generateCaption: true,
+ * })
+ *
+ * await writeFile('optimized.jpg', result.buffer)
+ * console.log(`Strategy: ${result.strategy}`)
+ * console.log(`Caption: ${result.caption}`)
+ */
 export async function optimizeForLLM(input: Buffer, options?: OptimizeOptions): Promise<OptimizeResult> {
   const analysis = await analyzeImage(input)
   const processed = await processImageByStrategy(input, analysis, options?.maxDimension, options?.quality)
