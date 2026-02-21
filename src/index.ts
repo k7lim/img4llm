@@ -1,5 +1,6 @@
 import sharp from 'sharp'
 import { extname } from 'node:path'
+import ImageTracer from 'imagetracerjs'
 
 // --- Types ---
 
@@ -47,6 +48,8 @@ export interface OptimizeOptions {
   generateCaption?: boolean
   /** Ollama model to use for caption generation. Default: 'qwen3-vl:4b' */
   captionModel?: string
+  /** Maximum colors for SVG conversion. Default: 16 */
+  maxSvgColors?: number
 }
 
 /** Result of image optimization */
@@ -142,6 +145,39 @@ export async function optimizeRasterImage(input: Buffer, maxDimension = 768, qua
     })
     .jpeg({ quality })
     .toBuffer()
+}
+
+/**
+ * Convert a raster image to SVG using imagetracerjs.
+ * @param input - The image buffer to convert
+ * @param maxColors - Maximum number of colors in the output SVG. Default: 16
+ * @returns SVG buffer
+ */
+export async function convertToSvg(input: Buffer, maxColors = 16): Promise<Buffer> {
+  // Get RGBA pixel data via sharp
+  const image = sharp(input).ensureAlpha()
+  const { data, info } = await image
+    .clone()
+    .raw()
+    .toBuffer({ resolveWithObject: true })
+
+  // Create ImageData object for imagetracerjs
+  // Note: imagetracerjs expects { width, height, data } where data is RGBA bytes
+  const imageData = {
+    width: info.width,
+    height: info.height,
+    data: new Uint8ClampedArray(data),
+  }
+
+  // Trace to SVG string
+  const svgString = ImageTracer.imagedataToSVG(imageData, {
+    numberofcolors: maxColors,
+    ltres: 1, // linear tolerance
+    qtres: 0.01, // quadratic spline tolerance
+    pathomit: 8, // omit small paths (noise reduction)
+  })
+
+  return Buffer.from(svgString, 'utf-8')
 }
 
 /**
@@ -253,13 +289,18 @@ export async function processImageByStrategy(
   analysis: ImageAnalysisResult,
   maxDimension?: number,
   quality?: number,
+  maxSvgColors?: number,
 ): Promise<Buffer> {
   switch (analysis.strategy) {
     case ImageStrategy.RASTER_OPTIMIZE:
       return optimizeRasterImage(buffer, maxDimension, quality)
     case ImageStrategy.CONVERT_TO_SVG:
-      // SVG conversion not yet implemented, falling back to raster optimization
-      return optimizeRasterImage(buffer, maxDimension, quality)
+      try {
+        return await convertToSvg(buffer, maxSvgColors)
+      } catch {
+        // Fall back to raster if SVG conversion fails
+        return optimizeRasterImage(buffer, maxDimension, quality)
+      }
     case ImageStrategy.KEEP_AS_IS:
       return buffer
   }
@@ -298,10 +339,18 @@ export async function processImageByStrategy(
  */
 export async function optimizeForLLM(input: Buffer, options?: OptimizeOptions): Promise<OptimizeResult> {
   const analysis = await analyzeImage(input)
-  const processed = await processImageByStrategy(input, analysis, options?.maxDimension, options?.quality)
+  const processed = await processImageByStrategy(
+    input,
+    analysis,
+    options?.maxDimension,
+    options?.quality,
+    options?.maxSvgColors,
+  )
   const mimeType = analysis.strategy === ImageStrategy.KEEP_AS_IS
     ? getImageMimeTypeFromFormat(analysis.metadata.format)
-    : 'image/jpeg'
+    : analysis.strategy === ImageStrategy.CONVERT_TO_SVG
+      ? 'image/svg+xml'
+      : 'image/jpeg'
 
   const result: OptimizeResult = {
     buffer: processed,

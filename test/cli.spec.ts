@@ -76,9 +76,9 @@ describe('CLI integration', () => {
   })
 
   it('optimize single file (default command)', async () => {
-    const { stdout } = await run([testPng])
+    const { stdout } = await run([largePng])
     expect(stdout).toContain('→')
-    const outputPath = join(tmpDir, 'test.optimized.jpg')
+    const outputPath = join(tmpDir, 'large.optimized.jpg')
     expect(existsSync(outputPath)).toBe(true)
     const meta = await sharp(outputPath).metadata()
     expect(meta.format).toBe('jpeg')
@@ -86,17 +86,17 @@ describe('CLI integration', () => {
 
   it('optimize with explicit subcommand', async () => {
     // Clean up from previous test
-    const outputPath = join(tmpDir, 'test.optimized.jpg')
+    const outputPath = join(tmpDir, 'large.optimized.jpg')
     if (existsSync(outputPath)) await rm(outputPath)
 
-    const { stdout } = await run(['optimize', testPng])
+    const { stdout } = await run(['optimize', largePng])
     expect(stdout).toContain('→')
     expect(existsSync(outputPath)).toBe(true)
   })
 
   it('optimize with --output flag', async () => {
     const customOut = join(tmpDir, 'custom.jpg')
-    await run([testPng, '--output', customOut])
+    await run([largePng, '--output', customOut])
     expect(existsSync(customOut)).toBe(true)
     const meta = await sharp(customOut).metadata()
     expect(meta.format).toBe('jpeg')
@@ -114,7 +114,7 @@ describe('CLI integration', () => {
   })
 
   it('optimize with --json flag', async () => {
-    const { stdout } = await run([testPng, '--json'])
+    const { stdout } = await run([largePng, '--json'])
     const parsed = JSON.parse(stdout)
     expect(Array.isArray(parsed)).toBe(true)
     expect(parsed.length).toBe(1)
@@ -129,13 +129,15 @@ describe('CLI integration', () => {
 
   it('optimize multiple files', async () => {
     // Clean up
-    for (const f of ['test.optimized.jpg', 'large.optimized.jpg']) {
+    for (const f of ['test.optimized.jpg', 'test.optimized.svg', 'large.optimized.jpg']) {
       const p = join(tmpDir, f)
       if (existsSync(p)) await rm(p)
     }
 
     await run([testPng, largePng])
-    expect(existsSync(join(tmpDir, 'test.optimized.jpg'))).toBe(true)
+    // testPng (solid red) will be converted to SVG
+    expect(existsSync(join(tmpDir, 'test.optimized.svg'))).toBe(true)
+    // largePng (gradient) will be raster optimized
     expect(existsSync(join(tmpDir, 'large.optimized.jpg'))).toBe(true)
   })
 
@@ -169,13 +171,9 @@ describe('CLI integration', () => {
   it('handles CONVERT_TO_SVG strategy output extension', async () => {
     const { stdout } = await run([tinyPng, '--json'])
     const parsed = JSON.parse(stdout)
-    expect(parsed[0].strategy).toBeDefined()
-    // Whether CONVERT_TO_SVG or RASTER_OPTIMIZE, file should be created
-    const possiblePaths = [
-      join(tmpDir, 'tiny.optimized.jpg'),
-      join(tmpDir, 'tiny.optimized.png'),
-    ]
-    const created = possiblePaths.some(p => existsSync(p))
-    expect(created).toBe(true)
+    expect(parsed[0].strategy).toBe('CONVERT_TO_SVG')
+    // CONVERT_TO_SVG should output .svg extension
+    const svgPath = join(tmpDir, 'tiny.optimized.svg')
+    expect(existsSync(svgPath)).toBe(true)
   })
 })

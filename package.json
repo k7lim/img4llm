@@ -29,6 +29,7 @@
   },
   "license": "MIT",
   "dependencies": {
+    "imagetracerjs": "^1.2.6",
     "sharp": "^0.33.2"
   },
   "devDependencies": {

@@ -3,6 +3,7 @@ import {
   countDistinctColors,
   determineStrategy,
   optimizeRasterImage,
+  convertToSvg,
   generateCaption,
   getImageMimeType,
   optimizeForLLM,
@@ -194,6 +195,33 @@ describe('optimizeRasterImage', () => {
   })
 })
 
+// --- convertToSvg ---
+
+describe('convertToSvg', () => {
+  it('converts a simple striped image to valid SVG', async () => {
+    const colors = [
+      { r: 255, g: 0, b: 0 },
+      { r: 0, g: 255, b: 0 },
+      { r: 0, g: 0, b: 255 },
+    ]
+    const img = await makeStripedImage(30, 30, colors)
+    const result = await convertToSvg(img, 4)
+
+    expect(result).toBeInstanceOf(Buffer)
+    const svgString = result.toString('utf-8')
+    expect(svgString).toContain('<svg')
+    expect(svgString).toContain('</svg>')
+  })
+
+  it('respects maxColors parameter', async () => {
+    const img = await makeSolidImage(10, 10, { r: 100, g: 150, b: 200 })
+    const result = await convertToSvg(img, 2)
+
+    const svgString = result.toString('utf-8')
+    expect(svgString).toContain('<svg')
+  })
+})
+
 // --- generateCaption ---
 
 describe('generateCaption', () => {
@@ -378,7 +406,19 @@ describe('optimizeForLLM', () => {
     globalThis.fetch = jest.fn().mockRejectedValue(new Error('ECONNREFUSED'))
 
     try {
-      const img = await makeSolidImage(100, 100, { r: 0, g: 0, b: 255 })
+      // Create an image with many colors to force RASTER_OPTIMIZE
+      const width = 500
+      const height = 500
+      const pixels = Buffer.alloc(width * height * 3)
+      for (let y = 0; y < height; y++) {
+        for (let x = 0; x < width; x++) {
+          const offset = (y * width + x) * 3
+          pixels[offset] = x % 256
+          pixels[offset + 1] = y % 256
+          pixels[offset + 2] = (x + y) % 256
+        }
+      }
+      const img = await sharp(pixels, { raw: { width, height, channels: 3 } }).png().toBuffer()
       const result = await optimizeForLLM(img, { generateCaption: true })
 
       expect(result.caption).toBeUndefined()
@@ -387,5 +427,22 @@ describe('optimizeForLLM', () => {
     } finally {
       globalThis.fetch = originalFetch
     }
+  })
+
+  it('returns SVG for simple images with few colors', async () => {
+    // Create a simple 3-color image that should trigger CONVERT_TO_SVG
+    const colors = [
+      { r: 255, g: 0, b: 0 },
+      { r: 0, g: 255, b: 0 },
+      { r: 0, g: 0, b: 255 },
+    ]
+    const img = await makeStripedImage(30, 30, colors)
+
+    const result = await optimizeForLLM(img, { maxSvgColors: 8 })
+
+    expect(result.strategy).toBe(ImageStrategy.CONVERT_TO_SVG)
+    expect(result.mimeType).toBe('image/svg+xml')
+    expect(result.buffer).toBeInstanceOf(Buffer)
+    expect(result.buffer.toString('utf-8')).toContain('<svg')
   })
 })

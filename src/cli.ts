@@ -134,6 +134,9 @@ function getOutputPath(inputPath: string, strategy: ImageStrategy): string {
   if (strategy === ImageStrategy.KEEP_AS_IS) {
     return resolve(dir, `${base}.optimized${ext}`)
   }
+  if (strategy === ImageStrategy.CONVERT_TO_SVG) {
+    return resolve(dir, `${base}.optimized.svg`)
+  }
   return resolve(dir, `${base}.optimized.jpg`)
 }
 
