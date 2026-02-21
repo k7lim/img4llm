@@ -55,10 +55,28 @@ const result = await optimizeForLLM(input, {
 })
 
 console.log(result.buffer)      // Optimized image Buffer
-console.log(result.mimeType)    // 'image/jpeg'
-console.log(result.strategy)    // ImageStrategy.RASTER_OPTIMIZE
+console.log(result.mimeType)    // 'image/jpeg' or 'image/svg+xml'
+console.log(result.strategy)    // ImageStrategy.RASTER_OPTIMIZE or ImageStrategy.CONVERT_TO_SVG
 console.log(result.metadata)    // { dimensions, format, filesize, ... }
 console.log(result.caption)     // Generated caption (if requested)
+```
+
+### SVG Conversion
+
+Simple images with few colors are automatically converted to SVG for better
+token efficiency with LLMs:
+
+```javascript
+// Images with <256 colors and <200KB are converted to SVG
+const result = await optimizeForLLM(simpleDiagramBuffer)
+
+if (result.strategy === 'CONVERT_TO_SVG') {
+  console.log(result.mimeType)  // 'image/svg+xml'
+  // result.buffer contains SVG XML
+}
+
+// Control SVG color count
+const result = await optimizeForLLM(buffer, { maxSvgColors: 8 })
 ```
 
 ### Analyzing Images
@@ -86,6 +104,7 @@ Main function to optimize an image for LLM consumption.
   - `quality` (number) - JPEG quality 1-100. Default: 85
   - `generateCaption` (boolean) - Generate caption via Ollama. Default: false
   - `captionModel` (string) - Ollama model name. Default: 'qwen3-vl:4b'
+  - `maxSvgColors` (number) - Max colors for SVG conversion. Default: 16
 
 **Returns:** `Promise<OptimizeResult>`
 - `buffer` (Buffer) - Optimized image data
@@ -132,21 +151,48 @@ Generate a caption for an image using Ollama.
 
 **Throws:** Error if Ollama is unavailable
 
+### `convertToSvg(input, maxColors?)`
+
+Convert a raster image to SVG using imagetracerjs.
+
+**Parameters:**
+- `input` (Buffer) - The image buffer to convert
+- `maxColors` (number, optional) - Maximum colors in output SVG. Default: 16
+
+**Returns:** `Promise<Buffer>` - SVG buffer (UTF-8 encoded)
+
 ### `ImageStrategy` (enum)
 
 - `RASTER_OPTIMIZE` - Resize and compress as JPEG
-- `CONVERT_TO_SVG` - Convert to SVG (falls back to raster optimization)
-- `KEEP_AS_IS` - Return unchanged (for SVGs)
+- `CONVERT_TO_SVG` - Convert to multi-color SVG (falls back to raster on failure)
+- `KEEP_AS_IS` - Return unchanged (for existing SVGs)
 
 ## How It Works
 
 1. **Analyze** - Extracts metadata (dimensions, format, color count, file size)
 2. **Determine Strategy** - Chooses optimal processing based on image characteristics:
    - SVGs are kept as-is
-   - Large files or many colors: raster optimization
-   - Simple images with few colors: potential SVG conversion
-3. **Process** - Applies the selected strategy (resize, compress)
+   - Large files (>1MB) or many colors (>10,000): raster optimization
+   - Simple images (<256 colors and <200KB): SVG conversion
+3. **Process** - Applies the selected strategy:
+   - Raster: resize and compress to JPEG
+   - SVG: trace to vector paths using imagetracerjs
 4. **Caption** (optional) - Generates description via Ollama
+
+### When SVG Conversion Happens
+
+SVG conversion is triggered automatically for images that meet these criteria:
+- Less than 256 distinct colors
+- File size under 200KB
+
+This is ideal for:
+- Diagrams and flowcharts
+- Icons and logos
+- Simple illustrations
+- Screenshots with limited color palettes
+
+The conversion uses multi-color tracing (not just black & white) to preserve
+the original appearance. You can control color count with `maxSvgColors`.
 
 ## Requirements
 
