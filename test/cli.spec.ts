@@ -129,14 +129,14 @@ describe('CLI integration', () => {
 
   it('optimize multiple files', async () => {
     // Clean up
-    for (const f of ['test.optimized.jpg', 'test.optimized.svg', 'large.optimized.jpg']) {
+    for (const f of ['test.optimized.jpg', 'large.optimized.jpg']) {
       const p = join(tmpDir, f)
       if (existsSync(p)) await rm(p)
     }
 
     await run([testPng, largePng])
-    // testPng (solid red) will be converted to SVG
-    expect(existsSync(join(tmpDir, 'test.optimized.svg'))).toBe(true)
+    // testPng (solid red) will be raster optimized (no VLM requested)
+    expect(existsSync(join(tmpDir, 'test.optimized.jpg'))).toBe(true)
     // largePng (gradient) will be raster optimized
     expect(existsSync(join(tmpDir, 'large.optimized.jpg'))).toBe(true)
   })
@@ -168,12 +168,12 @@ describe('CLI integration', () => {
     })
   })
 
-  it('handles CONVERT_TO_SVG strategy output extension', async () => {
+  it('handles RASTER_OPTIMIZE for small images without VLM', async () => {
     const { stdout } = await run([tinyPng, '--json'])
     const parsed = JSON.parse(stdout)
-    expect(parsed[0].strategy).toBe('CONVERT_TO_SVG')
-    // CONVERT_TO_SVG should output .svg extension
-    const svgPath = join(tmpDir, 'tiny.optimized.svg')
-    expect(existsSync(svgPath)).toBe(true)
+    expect(parsed[0].strategy).toBe('RASTER_OPTIMIZE')
+    // RASTER_OPTIMIZE should output .jpg extension
+    const jpgPath = join(tmpDir, 'tiny.optimized.jpg')
+    expect(existsSync(jpgPath)).toBe(true)
   })
 })

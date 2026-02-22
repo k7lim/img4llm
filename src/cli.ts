@@ -17,6 +17,7 @@ Options:
   -d, --max-dimension <px>   Max width/height (default: 768)
   -q, --quality <1-100>      JPEG quality (default: 85)
   -c, --caption              Generate caption via Ollama
+      --semantic-svg         Generate semantic SVG via VLM (diagrams, icons)
   -m, --caption-model <name> Ollama model (default: qwen3-vl:4b)
   -o, --output <path>        Output path (single file only)
       --json                 Machine-readable JSON output
@@ -30,6 +31,7 @@ const { values, positionals } = parseArgs({
     'max-dimension': { type: 'string', short: 'd' },
     quality:         { type: 'string', short: 'q' },
     caption:         { type: 'boolean', short: 'c' },
+    'semantic-svg':  { type: 'boolean' },
     'caption-model': { type: 'string', short: 'm' },
     output:          { type: 'string', short: 'o' },
     json:            { type: 'boolean' },
@@ -134,7 +136,7 @@ function getOutputPath(inputPath: string, strategy: ImageStrategy): string {
   if (strategy === ImageStrategy.KEEP_AS_IS) {
     return resolve(dir, `${base}.optimized${ext}`)
   }
-  if (strategy === ImageStrategy.CONVERT_TO_SVG) {
+  if (strategy === ImageStrategy.SEMANTIC_SVG) {
     return resolve(dir, `${base}.optimized.svg`)
   }
   return resolve(dir, `${base}.optimized.jpg`)
@@ -158,6 +160,7 @@ async function runOptimize(filePaths: string[]): Promise<void> {
     quality: values.quality ? Number(values.quality) : undefined,
     generateCaption: values.caption,
     captionModel: values['caption-model'],
+    semanticSvg: values['semantic-svg'],
   }
 
   if (values.output && filePaths.length > 1) {

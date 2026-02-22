@@ -24,6 +24,12 @@ img4llm optimize image.png --max-dimension 512 --quality 80
 # Generate caption via Ollama (requires Ollama running locally)
 img4llm optimize image.png --caption --caption-model qwen3-vl:4b
 
+# Generate semantic SVG for diagrams, icons, charts
+img4llm optimize diagram.png --semantic-svg
+
+# Combined: caption + semantic SVG in a single VLM call
+img4llm optimize diagram.png --caption --semantic-svg
+
 # JSON output for scripting
 img4llm optimize image.png --json
 ```
@@ -35,7 +41,8 @@ img4llm optimize image.png --json
 | `--max-dimension` | `-d` | 768 | Max width/height in pixels |
 | `--quality` | `-q` | 85 | JPEG quality (1-100) |
 | `--caption` | `-c` | false | Generate caption via Ollama |
-| `--caption-model` | `-m` | qwen3-vl:4b | Ollama model for captions |
+| `--semantic-svg` | | false | Generate semantic SVG via VLM |
+| `--caption-model` | `-m` | qwen3-vl:4b | Ollama model for captions/SVG |
 | `--output` | `-o` | - | Output path (single file only) |
 | `--json` | | false | Machine-readable JSON output |
 | `--help` | `-h` | | Show help |
@@ -56,28 +63,34 @@ const result = await optimizeForLLM(input, {
 
 console.log(result.buffer)      // Optimized image Buffer
 console.log(result.mimeType)    // 'image/jpeg' or 'image/svg+xml'
-console.log(result.strategy)    // ImageStrategy.RASTER_OPTIMIZE or ImageStrategy.CONVERT_TO_SVG
+console.log(result.strategy)    // ImageStrategy.RASTER_OPTIMIZE or ImageStrategy.SEMANTIC_SVG
 console.log(result.metadata)    // { dimensions, format, filesize, ... }
 console.log(result.caption)     // Generated caption (if requested)
 ```
 
-### SVG Conversion
+### Semantic SVG Generation
 
-Simple images with few colors are automatically converted to SVG for better
-token efficiency with LLMs:
+For diagrams, charts, icons, and simple illustrations, the VLM can generate clean
+semantic SVG directly — far more token-efficient than bitmap tracing:
 
 ```javascript
-// Images with <256 colors and <200KB are converted to SVG
-const result = await optimizeForLLM(simpleDiagramBuffer)
+const result = await optimizeForLLM(diagramBuffer, { semanticSvg: true })
 
-if (result.strategy === 'CONVERT_TO_SVG') {
+if (result.strategy === 'SEMANTIC_SVG') {
   console.log(result.mimeType)  // 'image/svg+xml'
-  // result.buffer contains SVG XML
+  // result.buffer contains clean semantic SVG (<5KB)
 }
 
-// Control SVG color count
-const result = await optimizeForLLM(buffer, { maxSvgColors: 8 })
+// Combine caption + SVG in a single VLM call (efficient)
+const result = await optimizeForLLM(diagramBuffer, {
+  generateCaption: true,
+  semanticSvg: true,
+})
 ```
+
+SVG generation is handled by the VLM in a single API call. If the image isn't
+suitable for SVG (photos, complex illustrations) or the generated SVG exceeds 5KB,
+it falls back to optimized JPEG automatically.
 
 ### Analyzing Images
 
@@ -104,7 +117,7 @@ Main function to optimize an image for LLM consumption.
   - `quality` (number) - JPEG quality 1-100. Default: 85
   - `generateCaption` (boolean) - Generate caption via Ollama. Default: false
   - `captionModel` (string) - Ollama model name. Default: 'qwen3-vl:4b'
-  - `maxSvgColors` (number) - Max colors for SVG conversion. Default: 16
+  - `semanticSvg` (boolean) - Generate semantic SVG via VLM. Default: false
 
 **Returns:** `Promise<OptimizeResult>`
 - `buffer` (Buffer) - Optimized image data
@@ -112,6 +125,25 @@ Main function to optimize an image for LLM consumption.
 - `strategy` (ImageStrategy) - Processing strategy used
 - `mimeType` (string) - MIME type of output
 - `caption` (string, optional) - Generated caption if requested
+
+### `analyzeWithVLM(input, options?)`
+
+Unified VLM analysis — handles caption and/or SVG generation in a single Ollama call.
+
+**Parameters:**
+- `input` (Buffer) - The image buffer
+- `options` (object, optional)
+  - `caption` (boolean) - Include caption in analysis
+  - `semanticSvg` (boolean) - Include SVG generation
+  - `model` (string) - Ollama model name. Default: 'qwen3-vl:4b'
+
+**Returns:** `Promise<VlmAnalysisResult>`
+- `caption` (string) - Generated caption
+- `svgCandidate` (boolean) - Whether image is suitable for SVG
+- `svgReason` (string) - Reason for candidacy decision
+- `svgCode` (string | null) - Generated SVG code, or null
+
+**Throws:** Error if Ollama is unavailable
 
 ### `analyzeImage(input)`
 
@@ -151,53 +183,42 @@ Generate a caption for an image using Ollama.
 
 **Throws:** Error if Ollama is unavailable
 
-### `convertToSvg(input, maxColors?)`
-
-Convert a raster image to SVG using imagetracerjs.
-
-**Parameters:**
-- `input` (Buffer) - The image buffer to convert
-- `maxColors` (number, optional) - Maximum colors in output SVG. Default: 16
-
-**Returns:** `Promise<Buffer>` - SVG buffer (UTF-8 encoded)
-
 ### `ImageStrategy` (enum)
 
 - `RASTER_OPTIMIZE` - Resize and compress as JPEG
-- `CONVERT_TO_SVG` - Convert to multi-color SVG (falls back to raster on failure)
+- `SEMANTIC_SVG` - VLM-generated semantic SVG (diagrams, icons, charts)
 - `KEEP_AS_IS` - Return unchanged (for existing SVGs)
 
 ## How It Works
 
 1. **Analyze** - Extracts metadata (dimensions, format, color count, file size)
-2. **Determine Strategy** - Chooses optimal processing based on image characteristics:
+2. **Determine Strategy** - Chooses optimal processing:
    - SVGs are kept as-is
-   - Large files (>1MB) or many colors (>10,000): raster optimization
-   - Simple images (<256 colors and <200KB): SVG conversion
-3. **Process** - Applies the selected strategy:
+   - All raster images default to raster optimization
+3. **VLM Analysis** (if `--caption` or `--semantic-svg`) - Single Ollama call handles:
+   - Caption generation
+   - SVG candidacy assessment (is this a diagram/icon/chart?)
+   - Semantic SVG generation (if candidate, under 5KB)
+4. **Process** - Applies the selected strategy:
    - Raster: resize and compress to JPEG
-   - SVG: trace to vector paths using imagetracerjs
-4. **Caption** (optional) - Generates description via Ollama
+   - Semantic SVG: use VLM-generated SVG directly
+   - Fallback: if VLM SVG is too large or image isn't suitable, use JPEG
 
-### When SVG Conversion Happens
+### When Semantic SVG Works Best
 
-SVG conversion is triggered automatically for images that meet these criteria:
-- Less than 256 distinct colors
-- File size under 200KB
-
-This is ideal for:
 - Diagrams and flowcharts
 - Icons and logos
-- Simple illustrations
-- Screenshots with limited color palettes
+- Simple charts and graphs
+- UI wireframes and mockups
 
-The conversion uses multi-color tracing (not just black & white) to preserve
-the original appearance. You can control color count with `maxSvgColors`.
+The VLM generates clean semantic SVG using native SVG elements (`<line>`, `<rect>`,
+`<circle>`, `<text>`, `<path>`). SVGs exceeding 5KB are discarded and the image
+falls back to optimized JPEG.
 
 ## Requirements
 
 - Node.js >= 18
-- Ollama (optional, for caption generation)
+- Ollama (optional, for caption and semantic SVG generation)
 
 ## License
 

@@ -3,7 +3,6 @@ import {
   countDistinctColors,
   determineStrategy,
   optimizeRasterImage,
-  convertToSvg,
   generateCaption,
   getImageMimeType,
   optimizeForLLM,
@@ -117,7 +116,7 @@ describe('determineStrategy', () => {
     expect(determineStrategy(metadata)).toBe(ImageStrategy.RASTER_OPTIMIZE)
   })
 
-  it('returns CONVERT_TO_SVG for low color count and small file', () => {
+  it('returns RASTER_OPTIMIZE for low color count and small file', () => {
     const metadata: ImageMetadata = {
       dimensions: { width: 200, height: 200 },
       format: 'png',
@@ -125,7 +124,7 @@ describe('determineStrategy', () => {
       distinctColors: 16,
       aspectRatio: 1,
     }
-    expect(determineStrategy(metadata)).toBe(ImageStrategy.CONVERT_TO_SVG)
+    expect(determineStrategy(metadata)).toBe(ImageStrategy.RASTER_OPTIMIZE)
   })
 
   it('returns RASTER_OPTIMIZE when colors < 256 but file is large', () => {
@@ -192,33 +191,6 @@ describe('optimizeRasterImage', () => {
     expect(meta.width).toBeLessThanOrEqual(500)
     expect(meta.height).toBeLessThanOrEqual(500)
     expect(meta.format).toBe('jpeg')
-  })
-})
-
-// --- convertToSvg ---
-
-describe('convertToSvg', () => {
-  it('converts a simple striped image to valid SVG', async () => {
-    const colors = [
-      { r: 255, g: 0, b: 0 },
-      { r: 0, g: 255, b: 0 },
-      { r: 0, g: 0, b: 255 },
-    ]
-    const img = await makeStripedImage(30, 30, colors)
-    const result = await convertToSvg(img, 4)
-
-    expect(result).toBeInstanceOf(Buffer)
-    const svgString = result.toString('utf-8')
-    expect(svgString).toContain('<svg')
-    expect(svgString).toContain('</svg>')
-  })
-
-  it('respects maxColors parameter', async () => {
-    const img = await makeSolidImage(10, 10, { r: 100, g: 150, b: 200 })
-    const result = await convertToSvg(img, 2)
-
-    const svgString = result.toString('utf-8')
-    expect(svgString).toContain('<svg')
   })
 })
 
@@ -429,8 +401,8 @@ describe('optimizeForLLM', () => {
     }
   })
 
-  it('returns SVG for simple images with few colors', async () => {
-    // Create a simple 3-color image that should trigger CONVERT_TO_SVG
+  it('returns RASTER_OPTIMIZE for simple images without VLM', async () => {
+    // Without --semantic-svg, all raster images are optimized as JPEG
     const colors = [
       { r: 255, g: 0, b: 0 },
       { r: 0, g: 255, b: 0 },
@@ -438,11 +410,37 @@ describe('optimizeForLLM', () => {
     ]
     const img = await makeStripedImage(30, 30, colors)
 
-    const result = await optimizeForLLM(img, { maxSvgColors: 8 })
+    const result = await optimizeForLLM(img)
 
-    expect(result.strategy).toBe(ImageStrategy.CONVERT_TO_SVG)
-    expect(result.mimeType).toBe('image/svg+xml')
+    expect(result.strategy).toBe(ImageStrategy.RASTER_OPTIMIZE)
+    expect(result.mimeType).toBe('image/jpeg')
     expect(result.buffer).toBeInstanceOf(Buffer)
-    expect(result.buffer.toString('utf-8')).toContain('<svg')
+  })
+
+  it('uses SEMANTIC_SVG when VLM returns valid SVG', async () => {
+    const originalFetch = globalThis.fetch
+    const img = await makeSolidImage(30, 30, { r: 100, g: 200, b: 50 })
+    const fakeSvg = '<svg xmlns="http://www.w3.org/2000/svg" width="30" height="30"><rect width="30" height="30" fill="green"/></svg>'
+
+    globalThis.fetch = jest.fn().mockImplementation((url: string) => {
+      if (url === `${OLLAMA_BASE}/api/tags`) {
+        return Promise.resolve({ ok: true })
+      }
+      return Promise.resolve({
+        ok: true,
+        json: () => Promise.resolve({
+          response: JSON.stringify({ caption: 'A green square', svgCandidate: true, svgReason: 'simple', svgCode: fakeSvg }),
+        }),
+      })
+    })
+
+    try {
+      const result = await optimizeForLLM(img, { semanticSvg: true })
+      expect(result.strategy).toBe(ImageStrategy.SEMANTIC_SVG)
+      expect(result.mimeType).toBe('image/svg+xml')
+      expect(result.buffer.toString('utf-8')).toContain('<svg')
+    } finally {
+      globalThis.fetch = originalFetch
+    }
   })
 })

@@ -1,6 +1,5 @@
 import sharp from 'sharp'
 import { extname } from 'node:path'
-import ImageTracer from 'imagetracerjs'
 
 // --- Types ---
 
@@ -22,8 +21,8 @@ export interface ImageMetadata {
 export enum ImageStrategy {
   /** Resize and compress as JPEG */
   RASTER_OPTIMIZE = 'RASTER_OPTIMIZE',
-  /** Convert to SVG (currently falls back to RASTER_OPTIMIZE) */
-  CONVERT_TO_SVG = 'CONVERT_TO_SVG',
+  /** VLM-generated semantic SVG */
+  SEMANTIC_SVG = 'SEMANTIC_SVG',
   /** Return unchanged (used for SVGs) */
   KEEP_AS_IS = 'KEEP_AS_IS',
 }
@@ -46,10 +45,10 @@ export interface OptimizeOptions {
   quality?: number
   /** Generate a caption using Ollama. Default: false */
   generateCaption?: boolean
-  /** Ollama model to use for caption generation. Default: 'qwen3-vl:4b' */
+  /** Ollama model to use for caption/SVG generation. Default: 'qwen3-vl:4b' */
   captionModel?: string
-  /** Maximum colors for SVG conversion. Default: 16 */
-  maxSvgColors?: number
+  /** Generate semantic SVG via VLM (for diagrams, charts, icons). Default: false */
+  semanticSvg?: boolean
 }
 
 /** Result of image optimization */
@@ -64,6 +63,18 @@ export interface OptimizeResult {
   mimeType: string
   /** Generated caption (only if generateCaption was true) */
   caption?: string
+}
+
+/** Result of unified VLM analysis */
+export interface VlmAnalysisResult {
+  /** Generated caption */
+  caption: string
+  /** Whether the image is a good SVG candidate */
+  svgCandidate: boolean
+  /** Reason for SVG candidacy decision */
+  svgReason: string
+  /** Generated SVG code, or null if not a candidate */
+  svgCode: string | null
 }
 
 // --- Image analysis ---
@@ -118,15 +129,12 @@ export async function countDistinctColors(input: Buffer, sampleSize = 1000): Pro
 /**
  * Determine the optimal processing strategy based on image metadata.
  * - SVGs are kept as-is
- * - Large files (>1MB) or many colors (>10k): raster optimization
- * - Simple images (<256 colors, <200KB): potential SVG conversion
+ * - All raster images default to raster optimization
  * @param metadata - Image metadata to analyze
  * @returns Recommended processing strategy
  */
 export function determineStrategy(metadata: ImageMetadata): ImageStrategy {
   if (metadata.format === 'svg') return ImageStrategy.KEEP_AS_IS
-  if (metadata.filesize > 1_000_000 || metadata.distinctColors > 10_000) return ImageStrategy.RASTER_OPTIMIZE
-  if (metadata.distinctColors < 256 && metadata.filesize < 200_000) return ImageStrategy.CONVERT_TO_SVG
   return ImageStrategy.RASTER_OPTIMIZE
 }
 
@@ -148,39 +156,6 @@ export async function optimizeRasterImage(input: Buffer, maxDimension = 768, qua
 }
 
 /**
- * Convert a raster image to SVG using imagetracerjs.
- * @param input - The image buffer to convert
- * @param maxColors - Maximum number of colors in the output SVG. Default: 16
- * @returns SVG buffer
- */
-export async function convertToSvg(input: Buffer, maxColors = 16): Promise<Buffer> {
-  // Get RGBA pixel data via sharp
-  const image = sharp(input).ensureAlpha()
-  const { data, info } = await image
-    .clone()
-    .raw()
-    .toBuffer({ resolveWithObject: true })
-
-  // Create ImageData object for imagetracerjs
-  // Note: imagetracerjs expects { width, height, data } where data is RGBA bytes
-  const imageData = {
-    width: info.width,
-    height: info.height,
-    data: new Uint8ClampedArray(data),
-  }
-
-  // Trace to SVG string
-  const svgString = ImageTracer.imagedataToSVG(imageData, {
-    numberofcolors: maxColors,
-    ltres: 1, // linear tolerance
-    qtres: 0.01, // quadratic spline tolerance
-    pathomit: 8, // omit small paths (noise reduction)
-  })
-
-  return Buffer.from(svgString, 'utf-8')
-}
-
-/**
  * Analyze an image and determine the optimal processing strategy.
  * @param input - The image buffer to analyze
  * @returns Analysis result with metadata and recommended strategy
@@ -195,9 +170,88 @@ export async function analyzeImage(input: Buffer): Promise<ImageAnalysisResult> 
   return { metadata, strategy, confidence: 1 }
 }
 
-// --- Caption generation ---
+// --- VLM analysis ---
 
 const OLLAMA_BASE_URL = 'http://localhost:11434'
+
+const VLM_PROMPT_FULL = `Analyze this image and respond with JSON only, no markdown fences:
+{
+  "caption": "Brief description under 100 words",
+  "svgCandidate": true or false (is this a simple diagram/chart/icon/logo that can be faithfully represented as SVG?),
+  "svgReason": "brief reason why or why not",
+  "svgCode": "<svg>...</svg> if svgCandidate is true, otherwise null"
+}
+
+If svgCandidate is true, generate minimal semantic SVG:
+- Use semantic elements (line, rect, circle, text, path)
+- Keep total SVG under 5KB
+- No embedded images or complex gradients`
+
+const VLM_PROMPT_CAPTION = `Describe this image concisely. Focus on main subject, text content, purpose. Under 100 words.
+Respond with JSON only: {"caption": "your description"}`
+
+/**
+ * Analyze an image using a VLM (via Ollama) in a single call.
+ * Handles caption generation and/or semantic SVG generation.
+ * Requires Ollama to be running locally on port 11434.
+ * @param input - The image buffer
+ * @param options - Analysis options
+ * @returns VLM analysis result with caption and optional SVG
+ * @throws Error if Ollama is unavailable
+ */
+export async function analyzeWithVLM(
+  input: Buffer,
+  options: {
+    caption?: boolean
+    semanticSvg?: boolean
+    model?: string
+  } = {},
+): Promise<VlmAnalysisResult> {
+  const model = options.model ?? 'qwen3-vl:4b'
+
+  const healthRes = await fetch(`${OLLAMA_BASE_URL}/api/tags`).catch(() => null)
+  if (!healthRes || !healthRes.ok) {
+    throw new Error('ollama is unavailable')
+  }
+
+  const prompt = options.semanticSvg ? VLM_PROMPT_FULL : VLM_PROMPT_CAPTION
+
+  const res = await fetch(`${OLLAMA_BASE_URL}/api/generate`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({
+      model,
+      prompt,
+      images: [input.toString('base64')],
+      stream: false,
+    }),
+  })
+
+  if (!res.ok) {
+    return { caption: '', svgCandidate: false, svgReason: '', svgCode: null }
+  }
+
+  const data = await res.json() as { response?: string }
+  const raw = (data.response ?? '').trim()
+
+  // Extract JSON from response (VLMs may include extra text)
+  const jsonMatch = raw.match(/\{[\s\S]*\}/)
+  if (!jsonMatch) {
+    return { caption: raw, svgCandidate: false, svgReason: '', svgCode: null }
+  }
+
+  try {
+    const parsed = JSON.parse(jsonMatch[0]) as Partial<VlmAnalysisResult>
+    return {
+      caption: typeof parsed.caption === 'string' ? parsed.caption.trim() : '',
+      svgCandidate: parsed.svgCandidate === true,
+      svgReason: typeof parsed.svgReason === 'string' ? parsed.svgReason : '',
+      svgCode: typeof parsed.svgCode === 'string' ? parsed.svgCode : null,
+    }
+  } catch {
+    return { caption: raw, svgCandidate: false, svgReason: '', svgCode: null }
+  }
+}
 
 /**
  * Generate a caption for an image using Ollama vision models.
@@ -212,28 +266,8 @@ const OLLAMA_BASE_URL = 'http://localhost:11434'
  * console.log(caption) // "A cat sitting on a windowsill"
  */
 export async function generateCaption(input: Buffer, model = 'qwen3-vl:4b'): Promise<string> {
-  const healthRes = await fetch(`${OLLAMA_BASE_URL}/api/tags`).catch(() => null)
-  if (!healthRes || !healthRes.ok) {
-    throw new Error('ollama is unavailable')
-  }
-
-  const res = await fetch(`${OLLAMA_BASE_URL}/api/generate`, {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({
-      model,
-      prompt: 'Describe this image concisely. Focus on main subject, text content, purpose. Under 100 words.',
-      images: [input.toString('base64')],
-      stream: false,
-    }),
-  })
-
-  if (!res.ok) {
-    return ''
-  }
-
-  const data = await res.json() as { response?: string }
-  return (data.response ?? '').trim()
+  const result = await analyzeWithVLM(input, { caption: true, model })
+  return result.caption
 }
 
 // --- MIME type helpers ---
@@ -289,18 +323,11 @@ export async function processImageByStrategy(
   analysis: ImageAnalysisResult,
   maxDimension?: number,
   quality?: number,
-  maxSvgColors?: number,
 ): Promise<Buffer> {
   switch (analysis.strategy) {
     case ImageStrategy.RASTER_OPTIMIZE:
       return optimizeRasterImage(buffer, maxDimension, quality)
-    case ImageStrategy.CONVERT_TO_SVG:
-      try {
-        return await convertToSvg(buffer, maxSvgColors)
-      } catch {
-        // Fall back to raster if SVG conversion fails
-        return optimizeRasterImage(buffer, maxDimension, quality)
-      }
+    case ImageStrategy.SEMANTIC_SVG:
     case ImageStrategy.KEEP_AS_IS:
       return buffer
   }
@@ -313,14 +340,15 @@ export async function processImageByStrategy(
  *
  * This is the main entry point for image optimization. It analyzes the image,
  * determines the best strategy, processes it accordingly, and optionally
- * generates a caption using Ollama.
+ * generates a caption and/or semantic SVG using a single Ollama VLM call.
  *
  * @param input - The image buffer to optimize
  * @param options - Optimization options
  * @param options.maxDimension - Maximum width/height in pixels. Default: 768
  * @param options.quality - JPEG quality (1-100). Default: 85
  * @param options.generateCaption - Generate caption via Ollama. Default: false
- * @param options.captionModel - Ollama model for captions. Default: 'qwen3-vl:4b'
+ * @param options.captionModel - Ollama model for captions/SVG. Default: 'qwen3-vl:4b'
+ * @param options.semanticSvg - Generate semantic SVG via VLM. Default: false
  * @returns Optimization result with processed buffer, metadata, and optional caption
  * @example
  * import { optimizeForLLM } from 'img4llm'
@@ -339,33 +367,57 @@ export async function processImageByStrategy(
  */
 export async function optimizeForLLM(input: Buffer, options?: OptimizeOptions): Promise<OptimizeResult> {
   const analysis = await analyzeImage(input)
-  const processed = await processImageByStrategy(
-    input,
-    analysis,
-    options?.maxDimension,
-    options?.quality,
-    options?.maxSvgColors,
-  )
+
+  // If VLM requested (caption and/or semanticSvg), do a single unified call
+  if (options?.generateCaption || options?.semanticSvg) {
+    let vlmResult: VlmAnalysisResult | null = null
+    try {
+      vlmResult = await analyzeWithVLM(input, {
+        caption: options.generateCaption,
+        semanticSvg: options.semanticSvg,
+        model: options.captionModel,
+      })
+    } catch {
+      // VLM errors are non-fatal; fall through to raster optimization
+    }
+
+    // Use VLM-generated SVG if it's a candidate and within size limit
+    if (options.semanticSvg && vlmResult?.svgCandidate && vlmResult.svgCode) {
+      const svgBuffer = Buffer.from(vlmResult.svgCode, 'utf-8')
+      if (svgBuffer.length <= 5120) {
+        return {
+          buffer: svgBuffer,
+          metadata: analysis.metadata,
+          strategy: ImageStrategy.SEMANTIC_SVG,
+          mimeType: 'image/svg+xml',
+          ...(options.generateCaption && vlmResult.caption ? { caption: vlmResult.caption } : {}),
+        }
+      }
+    }
+
+    // Fall back to metadata-determined strategy
+    const processed = await processImageByStrategy(input, analysis, options?.maxDimension, options?.quality)
+    const mimeType = analysis.strategy === ImageStrategy.KEEP_AS_IS
+      ? getImageMimeTypeFromFormat(analysis.metadata.format)
+      : 'image/jpeg'
+    return {
+      buffer: processed,
+      metadata: analysis.metadata,
+      strategy: analysis.strategy,
+      mimeType,
+      ...(options?.generateCaption && vlmResult?.caption ? { caption: vlmResult.caption } : {}),
+    }
+  }
+
+  // No VLM requested — just optimize
+  const processed = await processImageByStrategy(input, analysis, options?.maxDimension, options?.quality)
   const mimeType = analysis.strategy === ImageStrategy.KEEP_AS_IS
     ? getImageMimeTypeFromFormat(analysis.metadata.format)
-    : analysis.strategy === ImageStrategy.CONVERT_TO_SVG
-      ? 'image/svg+xml'
-      : 'image/jpeg'
-
-  const result: OptimizeResult = {
+    : 'image/jpeg'
+  return {
     buffer: processed,
     metadata: analysis.metadata,
     strategy: analysis.strategy,
     mimeType,
   }
-
-  if (options?.generateCaption) {
-    try {
-      result.caption = await generateCaption(input, options.captionModel)
-    } catch {
-      // Caption errors are non-fatal
-    }
-  }
-
-  return result
 }
