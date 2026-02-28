@@ -3,6 +3,7 @@ import {
   countDistinctColors,
   determineStrategy,
   optimizeRasterImage,
+  analyzeWithVLM,
   generateCaption,
   getImageMimeType,
   optimizeForLLM,
@@ -309,6 +310,67 @@ describe('generateCaption', () => {
   })
 })
 
+// --- analyzeWithVLM ---
+
+describe('analyzeWithVLM', () => {
+  const originalFetch = globalThis.fetch
+
+  afterEach(() => {
+    globalThis.fetch = originalFetch
+  })
+
+  it('uses caption prompt by default (no semanticSvg/extractText)', async () => {
+    const mockFetch = jest.fn().mockImplementation((url: string, init?: RequestInit) => {
+      if (url === `${OLLAMA_BASE}/api/tags`) return Promise.resolve({ ok: true })
+      if (url === `${OLLAMA_BASE}/api/generate`) {
+        const body = JSON.parse(init!.body as string) as { prompt: string }
+        expect(body.prompt).toContain('Respond with JSON only')
+        expect(body.prompt).not.toContain('"contentType"')
+        return Promise.resolve({
+          ok: true,
+          json: () => Promise.resolve({ response: JSON.stringify({ caption: 'A red pixel image.' }) }),
+        })
+      }
+      return Promise.reject(new Error('unexpected url'))
+    })
+    globalThis.fetch = mockFetch
+
+    const result = await analyzeWithVLM(TEST_IMAGE, { caption: true })
+    expect(result.caption).toBe('A red pixel image.')
+    expect(result.svgCandidate).toBe(false)
+    expect(result.svgCode).toBeNull()
+  })
+
+  it('uses full prompt when mode:full', async () => {
+    const mockFetch = jest.fn().mockImplementation((url: string, init?: RequestInit) => {
+      if (url === `${OLLAMA_BASE}/api/tags`) return Promise.resolve({ ok: true })
+      if (url === `${OLLAMA_BASE}/api/generate`) {
+        const body = JSON.parse(init!.body as string) as { prompt: string }
+        expect(body.prompt).toContain('"contentType"')
+        return Promise.resolve({
+          ok: true,
+          json: () => Promise.resolve({
+            response: JSON.stringify({
+              caption: 'A screenshot of a short paragraph.',
+              contentType: 'text',
+              svgCandidate: false,
+              svgReason: 'text',
+              svgCode: null,
+              extractedText: 'Hello world',
+            }),
+          }),
+        })
+      }
+      return Promise.reject(new Error('unexpected url'))
+    })
+    globalThis.fetch = mockFetch
+
+    const result = await analyzeWithVLM(TEST_IMAGE, { mode: 'full' })
+    expect(result.contentType).toBe('text')
+    expect(result.extractedText).toBe('Hello world')
+  })
+})
+
 // --- getImageMimeType ---
 
 describe('getImageMimeType', () => {
@@ -439,6 +501,40 @@ describe('optimizeForLLM', () => {
       expect(result.strategy).toBe(ImageStrategy.SEMANTIC_SVG)
       expect(result.mimeType).toBe('image/svg+xml')
       expect(result.buffer.toString('utf-8')).toContain('<svg')
+    } finally {
+      globalThis.fetch = originalFetch
+    }
+  })
+
+  it('returns extractedText when extractText:true and VLM classifies as text', async () => {
+    const originalFetch = globalThis.fetch
+    const img = await makeSolidImage(200, 80, { r: 255, g: 255, b: 255 })
+
+    globalThis.fetch = jest.fn().mockImplementation((url: string) => {
+      if (url === `${OLLAMA_BASE}/api/tags`) {
+        return Promise.resolve({ ok: true })
+      }
+      return Promise.resolve({
+        ok: true,
+        json: () => Promise.resolve({
+          response: JSON.stringify({
+            caption: 'A white image with black text.',
+            contentType: 'text',
+            svgCandidate: false,
+            svgReason: 'text-heavy',
+            svgCode: null,
+            extractedText: 'Line 1\nLine 2',
+          }),
+        }),
+      })
+    })
+
+    try {
+      const result = await optimizeForLLM(img, { extractText: true, generateCaption: true })
+      expect(result.strategy).toBe(ImageStrategy.RASTER_OPTIMIZE)
+      expect(result.mimeType).toBe('image/jpeg')
+      expect(result.caption).toBe('A white image with black text.')
+      expect(result.extractedText).toBe('Line 1\nLine 2')
     } finally {
       globalThis.fetch = originalFetch
     }

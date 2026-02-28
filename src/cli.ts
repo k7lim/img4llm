@@ -18,6 +18,7 @@ Options:
   -q, --quality <1-100>      JPEG quality (default: 85)
   -c, --caption              Generate caption via Ollama
       --semantic-svg         Generate semantic SVG via VLM (diagrams, icons)
+      --extract-text         Extract text for text-heavy images via VLM
   -m, --caption-model <name> Ollama model (default: qwen3-vl:4b)
   -o, --output <path>        Output path (single file only)
       --json                 Machine-readable JSON output
@@ -32,6 +33,7 @@ const { values, positionals } = parseArgs({
     quality:         { type: 'string', short: 'q' },
     caption:         { type: 'boolean', short: 'c' },
     'semantic-svg':  { type: 'boolean' },
+    'extract-text':  { type: 'boolean' },
     'caption-model': { type: 'string', short: 'm' },
     output:          { type: 'string', short: 'o' },
     json:            { type: 'boolean' },
@@ -152,6 +154,7 @@ interface OptimizeJsonEntry {
   outputSize: number
   dimensions: { width: number; height: number }
   caption?: string
+  extractedText?: string
 }
 
 async function runOptimize(filePaths: string[]): Promise<void> {
@@ -161,6 +164,7 @@ async function runOptimize(filePaths: string[]): Promise<void> {
     generateCaption: values.caption,
     captionModel: values['caption-model'],
     semanticSvg: values['semantic-svg'],
+    extractText: values['extract-text'],
   }
 
   if (values.output && filePaths.length > 1) {
@@ -198,6 +202,7 @@ async function runOptimize(filePaths: string[]): Promise<void> {
         outputSize: result.buffer.length,
         dimensions: result.metadata.dimensions,
         ...(result.caption ? { caption: result.caption } : {}),
+        ...(result.extractedText ? { extractedText: result.extractedText } : {}),
       })
     } else {
       const inputName = basename(filePath)
@@ -205,6 +210,12 @@ async function runOptimize(filePaths: string[]): Promise<void> {
       console.log(`✓ ${inputName} → ${outputName} (${result.strategy}, ${formatSize(inputSize)} → ${formatSize(result.buffer.length)})`)
       if (result.caption) {
         console.log(`  caption: "${result.caption}"`)
+      }
+      if (result.extractedText) {
+        const preview = result.extractedText.length > 100
+          ? result.extractedText.slice(0, 100) + '...'
+          : result.extractedText
+        console.log(`  extractedText: "${preview.replace(/\n/g, '\\n')}"`)
       }
     }
   }

@@ -49,6 +49,8 @@ export interface OptimizeOptions {
   captionModel?: string
   /** Generate semantic SVG via VLM (for diagrams, charts, icons). Default: false */
   semanticSvg?: boolean
+  /** Extract text for text-heavy images via VLM (OCR-style). Default: false */
+  extractText?: boolean
 }
 
 /** Result of image optimization */
@@ -63,18 +65,27 @@ export interface OptimizeResult {
   mimeType: string
   /** Generated caption (only if generateCaption was true) */
   caption?: string
+  /** Extracted text content (only for text-only images) */
+  extractedText?: string
 }
+
+/** Content type classification for images */
+export type ContentType = 'diagram' | 'text' | 'photo' | 'complex'
 
 /** Result of unified VLM analysis */
 export interface VlmAnalysisResult {
   /** Generated caption */
   caption: string
+  /** Classified content type of the image */
+  contentType: ContentType
   /** Whether the image is a good SVG candidate */
   svgCandidate: boolean
   /** Reason for SVG candidacy decision */
   svgReason: string
   /** Generated SVG code, or null if not a candidate */
   svgCode: string | null
+  /** Extracted text content, or null if not a text image */
+  extractedText: string | null
 }
 
 // --- Image analysis ---
@@ -177,15 +188,21 @@ const OLLAMA_BASE_URL = 'http://localhost:11434'
 const VLM_PROMPT_FULL = `Analyze this image and respond with JSON only, no markdown fences:
 {
   "caption": "Brief description under 100 words",
-  "svgCandidate": true or false (is this a simple diagram/chart/icon/logo that can be faithfully represented as SVG?),
+  "contentType": "diagram" | "text" | "photo" | "complex",
+  "svgCandidate": true or false (is this a simple diagram/chart/icon/logo?),
   "svgReason": "brief reason why or why not",
-  "svgCode": "<svg>...</svg> if svgCandidate is true, otherwise null"
+  "svgCode": "<svg>...</svg> if contentType is 'diagram', otherwise null",
+  "extractedText": "All readable text if contentType is 'text', otherwise null"
 }
 
-If svgCandidate is true, generate minimal semantic SVG:
-- Use semantic elements (line, rect, circle, text, path)
-- Keep total SVG under 5KB
-- No embedded images or complex gradients`
+Content type guidelines:
+- "diagram": Charts, flowcharts, icons, simple illustrations
+- "text": Documents, code screenshots, plain text images
+- "photo": Photographs
+- "complex": Detailed artwork with gradients/many colors
+
+If diagram: generate minimal semantic SVG under 5KB
+If text: extract all text, preserving structure and code indentation`
 
 const VLM_PROMPT_CAPTION = `Describe this image concisely. Focus on main subject, text content, purpose. Under 100 words.
 Respond with JSON only: {"caption": "your description"}`
@@ -204,6 +221,8 @@ export async function analyzeWithVLM(
   options: {
     caption?: boolean
     semanticSvg?: boolean
+    extractText?: boolean
+    mode?: 'caption' | 'full'
     model?: string
   } = {},
 ): Promise<VlmAnalysisResult> {
@@ -214,7 +233,11 @@ export async function analyzeWithVLM(
     throw new Error('ollama is unavailable')
   }
 
-  const prompt = options.semanticSvg ? VLM_PROMPT_FULL : VLM_PROMPT_CAPTION
+  const wantsFull =
+    options.mode === 'full' ||
+    options.semanticSvg === true ||
+    options.extractText === true
+  const prompt = wantsFull ? VLM_PROMPT_FULL : VLM_PROMPT_CAPTION
 
   const res = await fetch(`${OLLAMA_BASE_URL}/api/generate`, {
     method: 'POST',
@@ -228,7 +251,7 @@ export async function analyzeWithVLM(
   })
 
   if (!res.ok) {
-    return { caption: '', svgCandidate: false, svgReason: '', svgCode: null }
+    return { caption: '', contentType: 'complex', svgCandidate: false, svgReason: '', svgCode: null, extractedText: null }
   }
 
   const data = await res.json() as { response?: string }
@@ -237,20 +260,42 @@ export async function analyzeWithVLM(
   // Extract JSON from response (VLMs may include extra text)
   const jsonMatch = raw.match(/\{[\s\S]*\}/)
   if (!jsonMatch) {
-    return { caption: raw, svgCandidate: false, svgReason: '', svgCode: null }
+    return { caption: raw, contentType: 'complex', svgCandidate: false, svgReason: '', svgCode: null, extractedText: null }
   }
 
   try {
-    const parsed = JSON.parse(jsonMatch[0]) as Partial<VlmAnalysisResult>
+    const parsed = JSON.parse(jsonMatch[0]) as Partial<VlmAnalysisResult> & { contentType?: string }
+    const validContentTypes = ['diagram', 'text', 'photo', 'complex'] as const
+    const contentType = validContentTypes.includes(parsed.contentType as typeof validContentTypes[number])
+      ? parsed.contentType as ContentType
+      : 'complex'
     return {
       caption: typeof parsed.caption === 'string' ? parsed.caption.trim() : '',
+      contentType,
       svgCandidate: parsed.svgCandidate === true,
       svgReason: typeof parsed.svgReason === 'string' ? parsed.svgReason : '',
       svgCode: typeof parsed.svgCode === 'string' ? parsed.svgCode : null,
+      extractedText: typeof parsed.extractedText === 'string' ? parsed.extractedText : null,
     }
   } catch {
-    return { caption: raw, svgCandidate: false, svgReason: '', svgCode: null }
+    return { caption: raw, contentType: 'complex', svgCandidate: false, svgReason: '', svgCode: null, extractedText: null }
   }
+}
+
+function isLikelySemanticSvg(svgCode: string, maxBytes: number): boolean {
+  const svg = svgCode.trim()
+  if (!svg.startsWith('<svg')) return false
+  if (Buffer.byteLength(svg, 'utf8') > maxBytes) return false
+  if (/<image\b/i.test(svg)) return false
+  if (/href\s*=\s*["']data:image\//i.test(svg)) return false
+
+  const pathCount = (svg.match(/<path\b/gi) || []).length
+  if (pathCount > 10) return false
+
+  const hasTextOrShapes = /<(text|rect|circle|line|polyline|polygon)\b/i.test(svg)
+  if (!hasTextOrShapes) return false
+
+  return true
 }
 
 /**
@@ -369,12 +414,14 @@ export async function optimizeForLLM(input: Buffer, options?: OptimizeOptions): 
   const analysis = await analyzeImage(input)
 
   // If VLM requested (caption and/or semanticSvg), do a single unified call
-  if (options?.generateCaption || options?.semanticSvg) {
+  if (options?.generateCaption || options?.semanticSvg || options?.extractText) {
     let vlmResult: VlmAnalysisResult | null = null
     try {
       vlmResult = await analyzeWithVLM(input, {
         caption: options.generateCaption,
         semanticSvg: options.semanticSvg,
+        extractText: options.extractText,
+        mode: (options.semanticSvg || options.extractText) ? 'full' : 'caption',
         model: options.captionModel,
       })
     } catch {
@@ -383,8 +430,8 @@ export async function optimizeForLLM(input: Buffer, options?: OptimizeOptions): 
 
     // Use VLM-generated SVG if it's a candidate and within size limit
     if (options.semanticSvg && vlmResult?.svgCandidate && vlmResult.svgCode) {
-      const svgBuffer = Buffer.from(vlmResult.svgCode, 'utf-8')
-      if (svgBuffer.length <= 5120) {
+      if (isLikelySemanticSvg(vlmResult.svgCode, 5120)) {
+        const svgBuffer = Buffer.from(vlmResult.svgCode, 'utf-8')
         return {
           buffer: svgBuffer,
           metadata: analysis.metadata,
@@ -392,6 +439,19 @@ export async function optimizeForLLM(input: Buffer, options?: OptimizeOptions): 
           mimeType: 'image/svg+xml',
           ...(options.generateCaption && vlmResult.caption ? { caption: vlmResult.caption } : {}),
         }
+      }
+    }
+
+    // Handle text-only images: return minimal JPEG + extracted text
+    if ((options.extractText || options.generateCaption) && vlmResult?.contentType === 'text' && vlmResult.extractedText) {
+      const processed = await processImageByStrategy(input, analysis, options?.maxDimension, options?.quality)
+      return {
+        buffer: processed,
+        metadata: analysis.metadata,
+        strategy: ImageStrategy.RASTER_OPTIMIZE,
+        mimeType: 'image/jpeg',
+        ...(options.generateCaption && vlmResult.caption ? { caption: vlmResult.caption } : {}),
+        extractedText: vlmResult.extractedText,
       }
     }
 

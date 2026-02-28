@@ -27,6 +27,9 @@ img4llm optimize image.png --caption --caption-model qwen3-vl:4b
 # Generate semantic SVG for diagrams, icons, charts
 img4llm optimize diagram.png --semantic-svg
 
+# Extract text for text-heavy images (OCR-style via VLM)
+img4llm optimize screenshot.png --extract-text
+
 # Combined: caption + semantic SVG in a single VLM call
 img4llm optimize diagram.png --caption --semantic-svg
 
@@ -42,6 +45,7 @@ img4llm optimize image.png --json
 | `--quality` | `-q` | 85 | JPEG quality (1-100) |
 | `--caption` | `-c` | false | Generate caption via Ollama |
 | `--semantic-svg` | | false | Generate semantic SVG via VLM |
+| `--extract-text` | | false | Extract text for text-heavy images via VLM |
 | `--caption-model` | `-m` | qwen3-vl:4b | Ollama model for captions/SVG |
 | `--output` | `-o` | - | Output path (single file only) |
 | `--json` | | false | Machine-readable JSON output |
@@ -66,6 +70,7 @@ console.log(result.mimeType)    // 'image/jpeg' or 'image/svg+xml'
 console.log(result.strategy)    // ImageStrategy.RASTER_OPTIMIZE or ImageStrategy.SEMANTIC_SVG
 console.log(result.metadata)    // { dimensions, format, filesize, ... }
 console.log(result.caption)     // Generated caption (if requested)
+console.log(result.extractedText) // Extracted text (if requested and applicable)
 ```
 
 ### Semantic SVG Generation
@@ -135,13 +140,17 @@ Unified VLM analysis — handles caption and/or SVG generation in a single Ollam
 - `options` (object, optional)
   - `caption` (boolean) - Include caption in analysis
   - `semanticSvg` (boolean) - Include SVG generation
+  - `extractText` (boolean) - Include text extraction for text-heavy images
+  - `mode` ('caption' | 'full') - Force prompt mode (default: 'full' when semanticSvg/extractText, else 'caption')
   - `model` (string) - Ollama model name. Default: 'qwen3-vl:4b'
 
 **Returns:** `Promise<VlmAnalysisResult>`
 - `caption` (string) - Generated caption
+- `contentType` ('diagram' | 'text' | 'photo' | 'complex') - Classified content type
 - `svgCandidate` (boolean) - Whether image is suitable for SVG
 - `svgReason` (string) - Reason for candidacy decision
 - `svgCode` (string | null) - Generated SVG code, or null
+- `extractedText` (string | null) - Extracted text for text-heavy images, or null
 
 **Throws:** Error if Ollama is unavailable
 
